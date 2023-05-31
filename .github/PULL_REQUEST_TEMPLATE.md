@@ -1,4 +1,4 @@
-## Summary
+## Description
 
 Single phrase summary of the pull request
 
@@ -6,10 +6,14 @@ Single phrase summary of the pull request
 
 - Comprehensive list of changes (effect, not process)
 
-## Please review
+## Observations
+
+## Please, review
 
 - List of things authors emphasize to review
 
+## How to check the new features
 
+## Deploy notes
 
 

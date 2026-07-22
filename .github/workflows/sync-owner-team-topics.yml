@@ -1,0 +1,159 @@
+name: Sync owner team topics
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate proposed changes or apply them
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+
+permissions: {}
+
+concurrency:
+  group: sync-owner-team-topics
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync owner_team custom property to topics
+    runs-on: ubuntu-latest
+    env:
+      ORGANIZATION: Som-Energia
+      MODE: ${{ github.event_name == 'schedule' && 'apply' || inputs.mode }}
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.OWNER_TEAM_TOPIC_SYNC_CLIENT_ID }}
+          private-key: ${{ secrets.OWNER_TEAM_TOPIC_SYNC_PRIVATE_KEY }}
+          owner: ${{ env.ORGANIZATION }}
+
+      - name: Validate and synchronize topics
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          properties_file="${RUNNER_TEMP}/repository-properties.json"
+          repositories_file="${RUNNER_TEMP}/repositories-to-sync.json"
+
+          gh api --paginate --slurp \
+            "/orgs/${ORGANIZATION}/properties/values?per_page=100" \
+            > "${properties_file}"
+
+          invalid_properties="$(jq -c '
+            [ .[][]
+              | {
+                  repository: .repository_full_name,
+                  owner_teams: [
+                    .properties[]?
+                    | select(.property_name == "owner_team")
+                    | .value
+                  ]
+                }
+              | select(
+                  (.owner_teams | length) > 1
+                  or (
+                    (.owner_teams | length) == 1
+                    and (
+                      .owner_teams[0]
+                      | if type == "string" then
+                          test("^equip-[a-z0-9-]+$") | not
+                        else
+                          true
+                        end
+                    )
+                  )
+                )
+            ]
+          ' "${properties_file}")"
+
+          if [ "${invalid_properties}" != '[]' ]; then
+            {
+              echo '## Invalid owner_team values'
+              echo
+              echo 'No topics were changed because these repositories have an invalid or duplicate `owner_team` value:'
+              echo
+              echo '```json'
+              jq . <<< "${invalid_properties}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          jq '
+            [ .[][]
+              | {
+                  repository: .repository_full_name,
+                  owner_team: (
+                    [ .properties[]?
+                      | select(.property_name == "owner_team")
+                      | .value
+                    ][0]
+                  )
+                }
+              | select(.owner_team != null)
+            ]
+          ' "${properties_file}" > "${repositories_file}"
+
+          repository_count="$(jq 'length' "${repositories_file}")"
+          changed_count=0
+
+          {
+            echo '## Owner team topic synchronization'
+            echo
+            echo "- Mode: \`${MODE}\`"
+            echo "- Repositories with \`owner_team\`: ${repository_count}"
+            echo
+            echo '| Repository | Removed `equip-*` topics | Added topic | Status |'
+            echo '| --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          while IFS=$'\t' read -r repository owner_team; do
+            current_topics="$(gh api "/repos/${repository}/topics")"
+            desired_topics="$(jq -c --arg owner_team "${owner_team}" '
+              [ .names[]? | select(startswith("equip-") | not) ]
+              + [ $owner_team ]
+              | unique
+              | sort
+            ' <<< "${current_topics}")"
+
+            if jq -e --argjson desired_topics "${desired_topics}" '
+              (.names | sort) == ($desired_topics | sort)
+            ' <<< "${current_topics}" > /dev/null; then
+              printf '| `%s` | - | - | unchanged |\n' "${repository}" >> "${GITHUB_STEP_SUMMARY}"
+              continue
+            fi
+
+            removed_topics="$(jq -r '[.names[]? | select(startswith("equip-"))] | sort | join(", ")' <<< "${current_topics}")"
+            [ -n "${removed_topics}" ] || removed_topics='-'
+            printf '| `%s` | %s | `%s` | %s |\n' \
+              "${repository}" "${removed_topics}" "${owner_team}" "${MODE}" \
+              >> "${GITHUB_STEP_SUMMARY}"
+
+            if [ "${MODE}" = 'apply' ]; then
+              gh api --method PUT "/repos/${repository}/topics" \
+                --input <(jq -n --argjson names "${desired_topics}" '{names: $names}') \
+                > /dev/null
+            fi
+
+            changed_count=$((changed_count + 1))
+          done < <(jq -r '.[] | [.repository, .owner_team] | @tsv' "${repositories_file}")
+
+          {
+            echo
+            if [ "${MODE}" = 'apply' ]; then
+              echo "Applied ${changed_count} topic update(s)."
+            else
+              echo "${changed_count} topic update(s) would be applied."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

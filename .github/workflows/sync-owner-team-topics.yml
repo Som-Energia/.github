@@ -44,6 +44,7 @@ jobs:
           set -euo pipefail
 
           properties_file="${RUNNER_TEMP}/repository-properties.json"
+          raw_properties_file="${RUNNER_TEMP}/repository-properties.ndjson"
           repositories_file="${RUNNER_TEMP}/repositories-to-sync.json"
           schema_error_file="${RUNNER_TEMP}/owner-team-schema-error.txt"
 
@@ -61,13 +62,18 @@ jobs:
                 echo
                 echo 'No topics were changed. Confirm that the GitHub App has the organization permission `Custom properties: Read-only` and that its installation in `Som-Energia` has been updated after granting that permission.'
               fi
+              echo
+              echo 'GitHub CLI response:'
+              echo '```text'
+              printf '%s\n' "${schema_error}"
+              echo '```'
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
 
-          if ! gh api --paginate --slurp \
+          if ! gh api --paginate \
             "/orgs/${ORGANIZATION}/properties/values?per_page=100" \
-            > "${properties_file}"; then
+            --jq '.[]' > "${raw_properties_file}"; then
             {
               echo '## Cannot read organization custom properties'
               echo
@@ -76,13 +82,16 @@ jobs:
             exit 1
           fi
 
+          jq -s '.' "${raw_properties_file}" > "${properties_file}"
+
           invalid_properties="$(jq -c '
-            [ .[][]
+            [ .[]
               | {
                   repository: .repository_full_name,
                   owner_teams: [
                     .properties[]?
                     | select(.property_name == "owner_team")
+                    | select(.value != null)
                     | .value
                   ]
                 }
@@ -117,13 +126,14 @@ jobs:
           fi
 
           jq '
-            [ .[][]
+            [ .[]
               | {
                   repository: .repository_full_name,
                   owner_team: (
-                    [ .properties[]?
-                      | select(.property_name == "owner_team")
-                      | .value
+                      [ .properties[]?
+                        | select(.property_name == "owner_team")
+                        | select(.value != null)
+                        | .value
                     ][0]
                   )
                 }

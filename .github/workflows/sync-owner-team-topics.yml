@@ -45,6 +45,25 @@ jobs:
 
           properties_file="${RUNNER_TEMP}/repository-properties.json"
           repositories_file="${RUNNER_TEMP}/repositories-to-sync.json"
+          schema_error_file="${RUNNER_TEMP}/owner-team-schema-error.txt"
+
+          if ! gh api \
+            "/orgs/${ORGANIZATION}/properties/schema/owner_team" \
+            > /dev/null 2> "${schema_error_file}"; then
+            schema_error="$(< "${schema_error_file}")"
+            {
+              if [[ "${schema_error}" == *'(HTTP 404)'* ]]; then
+                echo '## Cannot find owner_team custom property'
+                echo
+                echo 'No topics were changed. The organization custom property `owner_team` does not exist. Restore or create it before running this workflow again.'
+              else
+                echo '## Cannot validate owner_team custom property'
+                echo
+                echo 'No topics were changed. Confirm that the GitHub App has the organization permission `Custom properties: Read-only` and that its installation in `Som-Energia` has been updated after granting that permission.'
+              fi
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
 
           if ! gh api --paginate --slurp \
             "/orgs/${ORGANIZATION}/properties/values?per_page=100" \
